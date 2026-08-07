@@ -53,7 +53,7 @@ it('exposes the untouched positional row under the reserved key', function () {
     $rows = [];
     $this->reader->readChunks('t.csv', 'local', $headers, 1, 10, function (array $chunk) use (&$rows) {
         $rows = array_merge($rows, $chunk);
-    });
+    }, withRawRow: true);
 
     expect($rows[0]['data'][FileReaderService::RAW_ROW_KEY])->toBe(['Ali', 'Veli']);
 });
@@ -67,7 +67,7 @@ it('reaches columns the header row does not describe', function () {
     $rows = [];
     $this->reader->readChunks('t.csv', 'local', $headers, 1, 10, function (array $chunk) use (&$rows) {
         $rows = array_merge($rows, $chunk);
-    });
+    }, withRawRow: true);
 
     expect($headers)->toHaveCount(2);
     expect($rows[0]['data'][FileReaderService::RAW_ROW_KEY])->toBe(['Ali', 'Veli', 'fazladan', 'bir', 'daha']);
@@ -80,7 +80,7 @@ it('renames a real column that would shadow the reserved raw row key', function 
     $rows = [];
     $this->reader->readChunks('t.csv', 'local', $headers, 1, 10, function (array $chunk) use (&$rows) {
         $rows = array_merge($rows, $chunk);
-    });
+    }, withRawRow: true);
 
     expect($headers)->toBe(['Ad', '__col_2']);
     expect($rows[0]['data'][FileReaderService::RAW_ROW_KEY])->toBe(['Ali', 'x']);
@@ -93,8 +93,20 @@ it('exposes the positional row through readRange too', function () {
     $rows = [];
     $this->reader->readRange('t.csv', 'local', $headers, 1, 2, 1, 10, function (array $chunk) use (&$rows) {
         $rows = array_merge($rows, $chunk);
-    });
+    }, withRawRow: true);
 
     expect($rows)->toHaveCount(1);
     expect($rows[0]['data'][FileReaderService::RAW_ROW_KEY])->toBe(['Ayse', 'Yilmaz']);
+});
+
+it('omits the raw row unless it is asked for, so existing callers see the same shape', function () {
+    Storage::disk('local')->put('t.csv', "Ad,Soyad\nAli,Veli\n");
+
+    $headers = $this->reader->readHeaders('t.csv', 'local');
+    $rows = [];
+    $this->reader->readChunks('t.csv', 'local', $headers, 1, 10, function (array $chunk) use (&$rows) {
+        $rows = array_merge($rows, $chunk);
+    });
+
+    expect(array_keys($rows[0]['data']))->toBe(['Ad', 'Soyad']);
 });

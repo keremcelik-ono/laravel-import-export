@@ -76,9 +76,10 @@ class FileReaderService
      *
      * @param  list<string>  $headers  Uniquified header names
      * @param  array<int, mixed>  $raw  The raw positional row
+     * @param  bool  $withRawRow  Attach the positional row under {@see RAW_ROW_KEY}
      * @return array<string, mixed>
      */
-    private function keyRow(array $headers, array $raw): array
+    private function keyRow(array $headers, array $raw, bool $withRawRow): array
     {
         $mapped = [];
 
@@ -86,7 +87,9 @@ class FileReaderService
             $mapped[$header] = $raw[$colIndex] ?? null;
         }
 
-        $mapped[self::RAW_ROW_KEY] = array_values($raw);
+        if ($withRawRow) {
+            $mapped[self::RAW_ROW_KEY] = array_values($raw);
+        }
 
         return $mapped;
     }
@@ -95,6 +98,10 @@ class FileReaderService
      * Iterate rows as header-keyed arrays, delivered in chunks.
      *
      * @param  callable(array $chunk, int $startRow): void  $callback
+     * @param  bool  $withRawRow  Also expose the untouched positional cells under
+     *   {@see RAW_ROW_KEY}. Off by default: it is only needed by a row
+     *   normalizer, and adding an array-valued key to every row would surprise
+     *   callers that iterate row keys rather than reading them by name.
      */
     public function readChunks(
         string $filePath,
@@ -103,8 +110,9 @@ class FileReaderService
         int $headerRow,
         int $chunkSize,
         callable $callback,
+        bool $withRawRow = false,
     ): void {
-        $this->withLocalPath($filePath, $disk, function (string $localPath) use ($headers, $headerRow, $chunkSize, $callback): void {
+        $this->withLocalPath($filePath, $disk, function (string $localPath) use ($headers, $headerRow, $chunkSize, $callback, $withRawRow): void {
             $dataRow = 0;
             $chunk = [];
 
@@ -115,7 +123,7 @@ class FileReaderService
 
                 $dataRow++;
 
-                $chunk[] = ['row_number' => $rowIndex + 1, 'data' => $this->keyRow($headers, $raw)];
+                $chunk[] = ['row_number' => $rowIndex + 1, 'data' => $this->keyRow($headers, $raw, $withRawRow)];
 
                 if (count($chunk) >= $chunkSize) {
                     $callback($chunk, $dataRow - count($chunk) + 1);
@@ -138,6 +146,8 @@ class FileReaderService
      * window ends — the rest of a multi-thousand-row file is never read.
      *
      * @param  callable(array $chunk): void  $callback
+     * @param  bool  $withRawRow  Also expose the untouched positional cells under
+     *   {@see RAW_ROW_KEY}; see {@see readChunks()}.
      */
     public function readRange(
         string $filePath,
@@ -148,8 +158,9 @@ class FileReaderService
         int $limit,
         int $chunkSize,
         callable $callback,
+        bool $withRawRow = false,
     ): void {
-        $this->withLocalPath($filePath, $disk, function (string $localPath) use ($headers, $headerRow, $startDataRow, $limit, $chunkSize, $callback): void {
+        $this->withLocalPath($filePath, $disk, function (string $localPath) use ($headers, $headerRow, $startDataRow, $limit, $chunkSize, $callback, $withRawRow): void {
             $endDataRow = $startDataRow + $limit - 1;
             $dataRow = 0;
             $chunk = [];
@@ -169,7 +180,7 @@ class FileReaderService
                     break; // past this job's window — stop reading the file
                 }
 
-                $chunk[] = ['row_number' => $rowIndex + 1, 'data' => $this->keyRow($headers, $raw)];
+                $chunk[] = ['row_number' => $rowIndex + 1, 'data' => $this->keyRow($headers, $raw, $withRawRow)];
 
                 if (count($chunk) >= $chunkSize) {
                     $callback($chunk);

@@ -119,6 +119,9 @@ class ProcessImportChunkJob implements ShouldQueue
                     );
                 }
             },
+            // Only a normalizer needs the positional row, and only it pays the
+            // cost of carrying one per row.
+            withRawRow: $normalizer !== null,
         );
     }
 

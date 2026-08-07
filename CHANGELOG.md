@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Repeating group fields + header-misaligned exports (2026-08-07)
+
+#### Added
+
+- **Repeating "group" fields.** A field declared as `'type' => 'group'` with a
+  `fields` map and `repeat.max` expands into `<group>.<slot>.<leaf>` mapping
+  targets, one set per slot, so a file carrying several records per row (jobs,
+  schools, languages) can be mapped column by column. Group leaves deliberately
+  carry no `validation` rules, so they never reach `updateOrCreate()`; they travel
+  in the mapped row to the processor, where nested relations belong.
+  `repeat.suffix_start` declares which number the export attaches to the FIRST
+  repeat (`1` for "FİRMA ADI 1", `0` when the first repeat is unsuffixed and the
+  second is "…1"), keeping slot alias generation unambiguous.
+- `HasImportExport::getImportGroups()` — group metadata (label, leaves, slot
+  count) so a mapping UI can render collapsible sections instead of a flat list
+  of dotted keys.
+- **`RowNormalizerContract`** — an optional per-session hook, applied by
+  `ProcessImportChunkJob` *before* column mappings, for exports whose data rows
+  drift out of step with their header row (repeating sections written with more
+  slots than the header declares, by an amount that varies per row — a shape no
+  `source_column => target_field` map can describe). Selected via the
+  `row_normalizer` session option and absent by default.
+- `FileReaderService::readChunks()` / `readRange()` accept `withRawRow` (default
+  `false`), which additionally exposes each row's untouched positional cells
+  under `FileReaderService::RAW_ROW_KEY`. A row normalizer needs those to realign
+  a row. Off by default so existing callers keep the exact row shape they had.
+
+#### Fixed
+
+- **`FileReaderService::readHeaders()` no longer loses columns to blank or
+  repeated headers.** Rows are keyed by header name downstream, so every blank
+  header used to collapse onto a single `''` key and a repeated header overwrote
+  the earlier one — silently dropping data. Blanks now become `__col_<1-based
+  index>` and later duplicates get a `__2`, `__3`, … suffix.
+  *Behaviour change:* `detected_headers` differs for files that contain blank or
+  duplicate headers, so a saved mapping template whose `source_column` was `''`
+  (or a duplicated name) will no longer match such a file and needs re-saving.
+  Files with unique, non-empty headers are unaffected.
+- **`ColumnMatcherService::normalize()` is now multibyte-safe.** It lower-cased
+  via the byte-based `strtolower()`, which leaves every multi-byte letter
+  untouched, so an upper-case Turkish header never matched its own alias
+  ("FİRMA ADI" vs "Firma Adı") and fell through to a fuzzy score well below the
+  auto-confirm threshold. Diacritics are folded to ASCII before lower-casing,
+  which also makes spelling variants agree ("Sehir" / "Şehir").
+  *Behaviour change:* such columns now score as exact label/alias matches (0.9+)
+  and therefore auto-confirm, where previously they were proposed unconfirmed and
+  waited for the user. Two fields whose aliases differ only by diacritics or case
+  now collide, and the first declared wins.
+
+
 ### Back-ported from source app (2026-06-18)
 
 Generic import/export improvements synced back from the consuming application,
