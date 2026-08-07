@@ -145,8 +145,30 @@ class ColumnMatcherService implements ColumnMatcherContract
         return min(round($combined, 3), 0.89);
     }
 
+    /**
+     * Case- and diacritic-insensitive key for comparing a header to a field.
+     *
+     * Diacritics are folded to ASCII *before* lower-casing because strtolower()
+     * is byte-based: it leaves every multi-byte letter untouched, so an
+     * upper-case Turkish header ("FİRMA ADI") never matched its own alias
+     * ("Firma Adı") and fell through to a fuzzy score below the auto-confirm
+     * threshold. Folding also makes spelling variants agree ("Sehir"/"Şehir"),
+     * which is how provider exports differ in practice.
+     */
     private function normalize(string $value): string
     {
-        return strtolower(trim(preg_replace('/[\s\-]+/', '_', $value)));
+        $folded = strtr($value, [
+            'ı' => 'i', 'İ' => 'i', 'I' => 'i', 'i' => 'i',
+            'ş' => 's', 'Ş' => 's',
+            'ğ' => 'g', 'Ğ' => 'g',
+            'ö' => 'o', 'Ö' => 'o',
+            'ü' => 'u', 'Ü' => 'u',
+            'ç' => 'c', 'Ç' => 'c',
+            'â' => 'a', 'Â' => 'a',
+            'î' => 'i', 'Î' => 'i',
+            'û' => 'u', 'Û' => 'u',
+        ]);
+
+        return mb_strtolower(trim(preg_replace('/[\s\-]+/', '_', $folded)), 'UTF-8');
     }
 }

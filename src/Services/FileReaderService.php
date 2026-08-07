@@ -12,6 +12,13 @@ use Illuminate\Support\Facades\Storage;
  */
 class FileReaderService
 {
+    /**
+     * Reserved row key carrying the untouched positional cell list. Row
+     * normalizers need it: a header-keyed row cannot express a sheet whose data
+     * columns drift out of step with its header row.
+     */
+    public const RAW_ROW_KEY = '__row';
+
     // ── Public API ────────────────────────────────────────────────────────
 
     public function readHeaders(string $filePath, string $disk, int $headerRow = 1): array
@@ -19,12 +26,69 @@ class FileReaderService
         return $this->withLocalPath($filePath, $disk, function (string $localPath) use ($headerRow): array {
             foreach ($this->rows($localPath) as $index => $row) {
                 if ($index + 1 === $headerRow) {
-                    return array_map(static fn ($v) => is_string($v) ? trim($v) : (string) $v, $row);
+                    return $this->uniqueHeaders($row);
                 }
             }
 
             return [];
         });
+    }
+
+    /**
+     * Trim headers and force them unique, because rows are keyed by header name
+     * downstream: blank headers would all collapse onto one '' key and repeated
+     * headers would overwrite each other, silently losing columns. Blanks become
+     * `__col_<1-based index>`; later duplicates get a `__2`, `__3`, … suffix. A
+     * literal collision with {@see RAW_ROW_KEY} is renamed too, so a real column
+     * can never shadow the reserved raw row.
+     *
+     * @param  array<int, mixed>  $row  The raw header row
+     * @return list<string>
+     */
+    private function uniqueHeaders(array $row): array
+    {
+        $headers = [];
+        $seen = [];
+
+        foreach (array_values($row) as $index => $value) {
+            $header = is_string($value) ? trim($value) : (string) $value;
+
+            if ($header === '' || $header === self::RAW_ROW_KEY) {
+                $header = '__col_'.($index + 1);
+            }
+
+            if (isset($seen[$header])) {
+                $header .= '__'.(++$seen[$header]);
+            } else {
+                $seen[$header] = 1;
+            }
+
+            $headers[] = $header;
+        }
+
+        return $headers;
+    }
+
+    /**
+     * Key one raw row by header name, preserving the full positional row under
+     * {@see RAW_ROW_KEY} so a row normalizer can still reach columns that the
+     * header row does not describe.
+     *
+     * @param  list<string>  $headers  Uniquified header names
+     * @param  array<int, mixed>  $raw  The raw positional row
+     * @return array<string, mixed>
+     */
+    private function keyRow(array $headers, array $raw): array
+    {
+        $mapped = [];
+
+        foreach ($headers as $colIndex => $header) {
+            $mapped[$header] = $raw[$colIndex] ?? null;
+        }
+
+        $mapped[self::RAW_ROW_KEY] = array_values($raw);
+
+        return $mapped;
     }
 
     /**
@@ -50,12 +114,8 @@ class FileReaderService
                 }
 
                 $dataRow++;
-                $mapped = [];
-                foreach ($headers as $colIndex => $header) {
-                    $mapped[$header] = $raw[$colIndex] ?? null;
-                }
 
-                $chunk[] = ['row_number' => $rowIndex + 1, 'data' => $mapped];
+                $chunk[] = ['row_number' => $rowIndex + 1, 'data' => $this->keyRow($headers, $raw)];
 
                 if (count($chunk) >= $chunkSize) {
                     $callback($chunk, $dataRow - count($chunk) + 1);
@@ -109,12 +169,7 @@ class FileReaderService
                     break; // past this job's window — stop reading the file
                 }
 
-                $mapped = [];
-                foreach ($headers as $colIndex => $header) {
-                    $mapped[$header] = $raw[$colIndex] ?? null;
-                }
-
-                $chunk[] = ['row_number' => $rowIndex + 1, 'data' => $mapped];
+                $chunk[] = ['row_number' => $rowIndex + 1, 'data' => $this->keyRow($headers, $raw)];
 
                 if (count($chunk) >= $chunkSize) {
                     $callback($chunk);

@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Throwable;
 use Umutcangungormus\LaravelImportExport\Contracts\FailureHandlerContract;
+use Umutcangungormus\LaravelImportExport\Contracts\RowNormalizerContract;
 use Umutcangungormus\LaravelImportExport\Enums\ImportStatus;
 use Umutcangungormus\LaravelImportExport\Exceptions\ProcessorNotRegistered;
 use Umutcangungormus\LaravelImportExport\Models\ImportSession;
@@ -89,6 +90,10 @@ class ProcessImportChunkJob implements ShouldQueue
         $headerRow = (int) $session->getOption('header_row', 1);
         $headers = $session->detected_headers ?? [];
 
+        // Optional per-session row repair for exports whose data rows drift out
+        // of step with their header row. Resolved once per job, not per row.
+        $normalizer = $this->resolveRowNormalizer($session);
+
         $fileReader->readRange(
             $session->file_path,
             $session->file_disk,
@@ -97,7 +102,7 @@ class ProcessImportChunkJob implements ShouldQueue
             $this->startRow,
             $this->limit,
             $chunkSize,
-            function (array $chunk) use ($session, $modelClass, $importableFields, $mappingLookup, $uniqueBy, $failureHandler, $processor) {
+            function (array $chunk) use ($session, $modelClass, $importableFields, $mappingLookup, $uniqueBy, $failureHandler, $processor, $normalizer, $headers) {
                 foreach ($chunk as $item) {
                     $this->processRow(
                         $session,
@@ -109,10 +114,30 @@ class ProcessImportChunkJob implements ShouldQueue
                         $item['data'],
                         $failureHandler,
                         $processor,
+                        $normalizer,
+                        $headers,
                     );
                 }
             },
         );
+    }
+
+    /**
+     * Resolve the session's row normalizer, or null when none is configured.
+     *
+     * @param  ImportSession  $session  Reads the `row_normalizer` option
+     */
+    private function resolveRowNormalizer(ImportSession $session): ?RowNormalizerContract
+    {
+        $class = $session->getOption('row_normalizer');
+
+        if (! is_string($class) || $class === '' || ! class_exists($class)) {
+            return null;
+        }
+
+        $normalizer = app($class);
+
+        return $normalizer instanceof RowNormalizerContract ? $normalizer : null;
     }
 
     private function processRow(
@@ -125,8 +150,22 @@ class ProcessImportChunkJob implements ShouldQueue
         array $rawData,
         FailureHandlerContract $failureHandler,
         object $processor,
+        ?RowNormalizerContract $normalizer = null,
+        array $headers = [],
     ): void {
+        // Recorded on failure without the bulky reserved raw row — the CSV should
+        // show the row as the user sees it, not an extra positional copy.
+        $reportedData = $rawData;
+        unset($reportedData[FileReaderService::RAW_ROW_KEY]);
+
         try {
+            // 0. Optional row repair for header-misaligned exports
+            if ($normalizer) {
+                $rawData = $normalizer->normalize($rawData, $headers, $session);
+                $reportedData = $rawData;
+                unset($reportedData[FileReaderService::RAW_ROW_KEY]);
+            }
+
             // 1. Transform raw row using mappings
             $mapped = $this->mapRow($rawData, $mappingLookup, $importableFields);
 
@@ -138,7 +177,7 @@ class ProcessImportChunkJob implements ShouldQueue
             $validator = Validator::make($mapped, $validationRules);
 
             if ($validator->fails()) {
-                $failureHandler->record($session, $rowNumber, $rawData, $validator->errors()->all());
+                $failureHandler->record($session, $rowNumber, $reportedData, $validator->errors()->all());
                 $session->increment('processed_rows');
 
                 return;
@@ -171,7 +210,7 @@ class ProcessImportChunkJob implements ShouldQueue
                 $session->increment('successful_rows');
             });
         } catch (Throwable $e) {
-            $failureHandler->record($session, $rowNumber, $rawData, [], $e->getMessage());
+            $failureHandler->record($session, $rowNumber, $reportedData, [], $e->getMessage());
         }
 
         $session->increment('processed_rows');

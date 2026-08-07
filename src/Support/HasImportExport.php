@@ -73,6 +73,12 @@ trait HasImportExport
         $result = [];
 
         foreach ($cfg['fields'] ?? [] as $field => $def) {
+            if (($def['type'] ?? null) === 'group') {
+                $result += static::expandGroupField($field, $def);
+
+                continue;
+            }
+
             $lang = isset($def['lang'])
                 ? static::resolveFieldLang($def['lang'])
                 : ['label' => $field, 'aliases' => []];
@@ -90,6 +96,129 @@ trait HasImportExport
         }
 
         return $result;
+    }
+
+    /**
+     * Flatten one repeating group definition into `"<group>.<slot>.<leaf>"` leaf
+     * fields — one set per slot — so the rest of the pipeline keeps treating
+     * every mapping target as a plain string key.
+     *
+     * Leaves deliberately carry NO `validation` rules: ProcessImportChunkJob
+     * only builds rules for fields that declare them, and `validated()` strips
+     * everything ruleless, so group values never reach `updateOrCreate()`. They
+     * still travel in the mapped row to the processor's prepare()/after(), which
+     * is where nested relations belong.
+     *
+     * @param  string  $group  Group key, e.g. `experience_information`
+     * @param  array<string, mixed>  $def  The group definition from config
+     * @return array<string, array<string, mixed>>
+     */
+    protected static function expandGroupField(string $group, array $def): array
+    {
+        $groupLang = isset($def['lang']) ? static::resolveFieldLang($def['lang']) : null;
+        $groupLabel = $groupLang['label'] ?? $def['label'] ?? $group;
+        $slots = max(1, (int) ($def['repeat']['max'] ?? 1));
+        // Which number the export attaches to the FIRST repeat. eleman.net
+        // writes "FİRMA ADI 1" for the first job (1); Kariyer.net leaves the
+        // first unsuffixed and writes "IsTecrubesiIsyeriAdi1" for the second (0).
+        // Declaring it per group keeps alias generation unambiguous — without it
+        // the same spelling would be claimed by two different slots.
+        $suffixStart = (int) ($def['repeat']['suffix_start'] ?? 1);
+
+        $fields = [];
+
+        for ($slot = 0; $slot < $slots; $slot++) {
+            foreach ($def['fields'] ?? [] as $leaf => $leafDef) {
+                $leafLang = isset($leafDef['lang'])
+                    ? static::resolveFieldLang($leafDef['lang'])
+                    : ['label' => $leafDef['label'] ?? $leaf, 'aliases' => []];
+
+                $aliases = array_values(array_unique(array_merge(
+                    $leafLang['aliases'],
+                    (array) ($leafDef['aliases'] ?? []),
+                )));
+
+                $key = "{$group}.{$slot}.{$leaf}";
+
+                $fields[$key] = array_merge($leafDef, [
+                    // "İş Deneyimi 2 · Firma" reads better than the raw dotted key
+                    // in the mapping UI, which shows one row per leaf.
+                    'label' => $groupLabel.' '.($slot + 1).' · '.$leafLang['label'],
+                    // Slot-suffixed variants ("Firma Adı 2") let the matcher hit
+                    // an exact alias (0.9) rather than falling back to fuzzy.
+                    'aliases' => static::slotAliases($aliases, $slot, $suffixStart),
+                    'type' => $leafDef['type'] ?? 'string',
+                    // A group slot is never mapping-required: a file may carry
+                    // fewer slots than the group declares.
+                    'required' => false,
+                    'group' => $group,
+                    'group_label' => $groupLabel,
+                    'group_index' => $slot,
+                    'group_field' => $leaf,
+                ]);
+
+                unset($fields[$key]['lang'], $fields[$key]['validation']);
+            }
+        }
+
+        return $fields;
+    }
+
+    /**
+     * Build the alias list for one slot: the bare aliases (only where this slot
+     * is the unsuffixed one) plus the spaced and unspaced suffix spellings.
+     *
+     * @param  list<string>  $aliases  The leaf's base aliases
+     * @param  int  $slot  Zero-based slot index
+     * @param  int  $suffixStart  Number the export attaches to the first repeat
+     * @return list<string>
+     */
+    protected static function slotAliases(array $aliases, int $slot, int $suffixStart = 1): array
+    {
+        $suffix = $slot + $suffixStart;
+
+        // suffix_start = 0 means the first repeat carries no number at all, so
+        // slot 0 owns the bare spelling and slot 1 owns "…1".
+        $result = $suffix === 0 ? $aliases : [];
+
+        foreach ($aliases as $alias) {
+            if ($suffix === 0) {
+                continue;
+            }
+
+            $result[] = $alias.' '.$suffix;
+            $result[] = $alias.$suffix;
+        }
+
+        return array_values(array_unique($result));
+    }
+
+    /**
+     * Group metadata for the HTTP/UI layer: what groups exist, their leaves and
+     * how many slots each declares. Lets a mapping UI render collapsible group
+     * sections instead of a flat list of dotted keys.
+     *
+     * @return array<string, array{label: string, max: int, fields: array<string, array<string, mixed>>}>
+     */
+    public static function getImportGroups(): array
+    {
+        $groups = [];
+
+        foreach (static::modelConfig()['fields'] ?? [] as $field => $def) {
+            if (($def['type'] ?? null) !== 'group') {
+                continue;
+            }
+
+            $lang = isset($def['lang']) ? static::resolveFieldLang($def['lang']) : null;
+
+            $groups[$field] = [
+                'label' => $lang['label'] ?? $def['label'] ?? $field,
+                'max' => max(1, (int) ($def['repeat']['max'] ?? 1)),
+                'fields' => $def['fields'] ?? [],
+            ];
+        }
+
+        return $groups;
     }
 
     public static function getImportUniqueBy(): ?array
